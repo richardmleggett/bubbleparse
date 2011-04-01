@@ -2018,7 +2018,8 @@ void look_for_quality_scores_in_fastq(char* input_filename)
 		fputs("Out of memory trying to allocate Sequence\n",stderr);
 		exit(1);
 	}
-	alloc_sequence(seq, max_read_length, MAX_LINE_LENGTH);
+    // TODO: Always defaults to offset 33 (Sanger), but for completeness, should this be a parameter?
+	alloc_sequence(seq, max_read_length, MAX_LINE_LENGTH, 33);
 	
 	// max_read_length/(kmer_size+1) is the worst case for the number of sliding windows, ie a kmer follow by a low-quality/bad base
 	int max_windows = max_read_length/(kmer_size+1);
@@ -2064,7 +2065,7 @@ void look_for_quality_scores_in_fastq(char* input_filename)
 			seq_length += (long long) entry_length;
 			
 			char quality_cut_off = 0;
-			int nkmers = get_sliding_windows_from_sequence(seq->seq, seq->qual, entry_length, quality_cut_off, kmer_size, windows, max_windows, max_kmers);
+			int nkmers = get_sliding_windows_from_sequence(seq->seq, seq->qual, entry_length, quality_cut_off, kmer_size, windows, max_windows, max_kmers, false, 0);
 			
 			if (nkmers == 0) {
 				count_bad_reads++;
