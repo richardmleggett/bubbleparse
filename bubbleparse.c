@@ -20,6 +20,7 @@
 #include <time.h>
 #include <execinfo.h>
 #include <signal.h>
+#include <inttypes.h>
 #include "binary_kmer.h"
 #include "flags.h"
 #include "element.h"
