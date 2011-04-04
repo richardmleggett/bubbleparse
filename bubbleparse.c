@@ -2065,7 +2065,7 @@ void look_for_quality_scores_in_fastq(char* input_filename)
 			seq_length += (long long) entry_length;
 			
 			char quality_cut_off = 0;
-			int nkmers = get_sliding_windows_from_sequence(seq->seq, seq->qual, entry_length, quality_cut_off, kmer_size, windows, max_windows, max_kmers, false, 0);
+			int nkmers = get_sliding_windows_from_sequence_with_quality(seq->seq, seq->qual, entry_length, quality_cut_off, kmer_size, windows, max_windows, max_kmers);
 			
 			if (nkmers == 0) {
 				count_bad_reads++;
