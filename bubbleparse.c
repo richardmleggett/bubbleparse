@@ -15,6 +15,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <assert.h>
 #include <ctype.h>
 #include <math.h>
 #include <time.h>
@@ -134,7 +135,7 @@ int minimum_contig_size = 0;
  * Table column widths                                                  *
  *----------------------------------------------------------------------*/
 //                     0  1  2  3   4  5  6  7  8  9  10 11 12 13 14 15 16 17 18 19 20 21 22 23 24  25  26  27  28  29  30 
-int column_widths[] = {6, 6, 3, 10, 5, 3, 3, 3, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 12, 10, 10, 10, 10, 10, 10};
+int column_widths[] = {6, 6, 3, 10, 5, 3, 3, 3, 6, 8, 8, 8, 8, 8, 8, 6, 6, 6, 6, 6, 6, 6, 6, 6, 12, 10, 10, 10, 10, 10, 10};
 int space_between_columns = 1;
 #ifdef EXTRA_STATS
 int number_of_columns = 31;
@@ -785,6 +786,7 @@ double get_average_bubble_coverage(int m, int p, int c, short* coverage_complete
 	int total = 0;
 	int start = matches[m]->paths[p]->pre;
 	int end = start + matches[m]->paths[p]->mid;
+    double average = 0.0;
 
 	*coverage_complete = 1;
 	
@@ -799,8 +801,12 @@ double get_average_bubble_coverage(int m, int p, int c, short* coverage_complete
 	if (total == 0) {
 		return 0;
 	}
+    
+    //if (*coverage_complete == 1) {
+        average = (double)total/(double)(end-start);
+    //}
 	
-	return (double)total/(double)(end-start);
+	return average;
 }
 
 /*----------------------------------------------------------------------*
@@ -1705,7 +1711,7 @@ void make_flags_string(char* tmp_string, int m)
         strcat(tmp_string, "R");
     } else {
         strcat(tmp_string, "-");
-    }	
+    }    
 }
 
 /*----------------------------------------------------------------------*
@@ -1749,7 +1755,7 @@ void output_rank_table(void)
     }        
     
     if (csv_fp) {
-        fputs("Rank,Match,NumPth,Type,LngstCntig,LenP0,LenP1,CovC0P0,CovC0P1,CovC1P0,CovC1P1,PcC0P0,PcC0P1,PcC1P0,PcC1P1,C0Dif,C1Dif,QTotal", csv_fp);
+        fputs("Rank,Match,NumPth,Type,LngstCntig,LenP0,LenP1,CovC0P0,CovC0P1,CovC1P0,CovC1P1,PcC0P0,PcC0P1,PcC1P0,PcC1P1,C0Dif,C1Dif,QTotal\n", csv_fp);
     }
 	
 	strcpy(previous_type, matches[0]->statistics.type);
@@ -1793,16 +1799,32 @@ void output_rank_table(void)
             add_to_table(table_line, tmp_string, &column);
 			
 			for (p=0; p<3; p++) {
-				if (p < matches[m]->number_of_paths) {
-                    add_double_to_table(table_line, "%.2f", matches[m]->statistics.coverage_av[p][0], &column);
+				if ((p < matches[m]->number_of_paths) && (matches[m]->statistics.coverage_av[p][0] > 0.0)) {
+                    char temp[64];
+                    
+                    if (matches[m]->statistics.coverage_complete[p][0]) {
+                        sprintf(temp, "%.2f", matches[m]->statistics.coverage_av[p][0]);
+                    } else {
+                        sprintf(temp, "(%.2f)", matches[m]->statistics.coverage_av[p][0]);
+                    }                    
+                    add_to_table(table_line, temp, &column);
+                    //add_double_to_table(table_line, "%.2f", matches[m]->statistics.coverage_av[p][0], &column);
 				} else {
                     add_to_table(table_line, "", &column);
 				}
 			}
 			
 			for (p=0; p<3; p++) {
-				if (p < matches[m]->number_of_paths) {
-                    add_double_to_table(table_line, "%.2f", matches[m]->statistics.coverage_av[p][1], &column);
+				if ((p < matches[m]->number_of_paths) && (matches[m]->statistics.coverage_av[p][1] > 0.0)) {
+                    char temp[64];
+                    
+                    if (matches[m]->statistics.coverage_complete[p][1]) {
+                        sprintf(temp, "%.2f", matches[m]->statistics.coverage_av[p][1]);
+                    } else {
+                        sprintf(temp, "(%.2f)", matches[m]->statistics.coverage_av[p][1]);
+                    }                    
+                    add_to_table(table_line, temp, &column);
+                    //add_double_to_table(table_line, "%.2f", matches[m]->statistics.coverage_av[p][1], &column);
 				} else {
                     add_to_table(table_line, "", &column);
 				}
@@ -2509,6 +2531,11 @@ void make_test_quality_data(void)
 		char qs[kmer_size+1];
 		for (c=0; c<number_of_colours; c++) {
 			QualityStringArray *qa = &node->quality_string_arrays[c];
+            
+            assert(qa != 0);            
+            assert(qa->number_of_strings >= 0);
+            assert(qa->limit >= qa->number_of_strings);
+            
 			for (i=qa->number_of_strings; i<qa->limit; i++) {
 				make_random_quality_string(qs);
 				element_add_quality_string(node, c, qs);
