@@ -146,6 +146,7 @@ int quality_offset = 64;
 int n_length_adjusted = 0;
 int n_kmers_already = 0;
 int deduplicate = 0;
+int use_quality_scores = 0;
 int n_deduplicates = 0;
 int max_line_length = 8*1024*1024;
 
@@ -382,7 +383,7 @@ void get_first_and_last_kmers(char* line, int m, int p)
     for (i=0; i<strlen(matches[m]->paths[p]->first_bubble_kmer); i++) {
         char c = toupper(matches[m]->paths[p]->first_bubble_kmer[i]);
         if (c != 'A' && c != 'C' && c != 'G' && c != 'T') {
-            printf("Error: bad character in match %i path % i (%c)\n", m, p, c);
+            printf("Error: bad character in match %i path %i (%c)\n", m, p, c);
             exit(1);
         }
     }
@@ -483,7 +484,7 @@ void preprocess_match(PreprocessedMatch *match)
                        match->paths[p].length, match->paths[p].pre, match->paths[p].mid, match->paths[p].post, match->match_number, p);
             
             if (match->paths[p].mid < 0) {
-                printf("Error: calculated mid length wrong for match %d path %d. Is the kmer size set correctly?\n", match->match_number, p);
+                printf("Error: calculated mid length wrong for match %d path %d. Is kmer size correct?\n", match->match_number, p);
                 exit(1);
             }
             
@@ -1073,7 +1074,7 @@ void read_coverage_file(char* filename)
                             // If not found, insert it
                             Element * current_entry = hash_table_insert(element_get_key(&b, kmer_size, &tmp_kmer), hash_table); 
                             if (current_entry == NULL) {
-                                printf("Error: couldn't add kmer to has table.\n");
+                                printf("Error: couldn't add kmer to hash table.\n");
                                 fclose(fp);
                                 exit(1);
                             }
@@ -1378,8 +1379,9 @@ void calculate_probabilities(int m)
     char* kmer_string;
 
     // Check all paths are kmer size...
-    if (!check_all_paths_at_least_kmer_size(m))
+    if (!check_all_paths_at_least_kmer_size(m)) {
         return;
+    }
     
     matches[m]->statistics.q_total = 0;
     
@@ -2748,13 +2750,13 @@ void output_specified_match_contigs(char *in, char* out)
 
     fp_in = fopen(in, "r");
     if (!fp_in) {
-        printf("ERROR: Can't open specified matches filename.\n");
+        printf("Error: Can't open specified matches filename.\n");
         exit(1);
     }
 
     fp_out = fopen(out, "w");
     if (!fp_out) {
-        printf("ERROR: Can't open specified matches output ilename.\n");
+        printf("Error: Can't open specified matches output ilename.\n");
         exit(1);
     }
     
@@ -3024,34 +3026,35 @@ void parse_command_line_args(int argc, char* argv[])
                 case 'c':
                     rank_csv_filename = parse_string(argc, argv, &i);
                     if (!rank_csv_filename) {
-                        printf("ERROR: Invalid filename for -c parameter.\n");
+                        printf("Error: Invalid filename for -c parameter.\n");
                         exit(1);
                     }
                     break;
                 case 'd':
                     debug_log_filename = parse_string(argc, argv, &i);
                     if (!debug_log_filename) {
-                        printf("ERROR: Invalid filename for -d parameter.\n");
+                        printf("Error: Invalid filename for -d parameter.\n");
                         exit(1);
                     }
                 case 'e':
                     expected_filename = parse_string(argc, argv, &i);
                     if (!expected_filename) {
-                        printf("ERROR: Invalid filename for -e parameter.\n");
+                        printf("Error: Invalid filename for -e parameter.\n");
                         exit(1);
                     }
                     break;
                 case 'f':
                     base_filename = parse_string(argc, argv, &i);
                     if (!base_filename) {
-                        printf("ERROR: Invalid filename for -f parameter.\n");
+                        printf("Error: Invalid filename for -f parameter.\n");
                         exit(1);
                     }
                     break;
                 case 'i':
                     file_of_filenames = parse_string(argc, argv, &i);
+                    use_quality_scores = 1;
                     if (!file_of_filenames) {
-                        printf("ERROR: Invalid filename for -i parameter.\n");
+                        printf("Error: Invalid filename for -i parameter.\n");
                         exit(1);
                     }
                     break;
@@ -3065,41 +3068,41 @@ void parse_command_line_args(int argc, char* argv[])
                 case 'l':
                     rank_log_filename = parse_string(argc, argv, &i);
                     if (!rank_log_filename) {
-                        printf("ERROR: Invalid filename for -l parameter.\n");
+                        printf("Error: Invalid filename for -l parameter.\n");
                         exit(1);
                     }
                     break;
                 case 'm':
                     match_selection_filename = parse_string(argc, argv, &i);
                     if (!match_selection_filename) {
-                        printf("ERROR: Must specify a filename for -m parameter.\n");
+                        printf("Error: Must specify a filename for -m parameter.\n");
                         exit(1);
                     }
                     break;
                 case 'o':
                     options_filename = parse_string(argc, argv, &i);
                     if (!options_filename) {
-                        printf("ERROR: Invalid filename for -o parameter.\n");
+                        printf("Error: Invalid filename for -o parameter.\n");
                         exit(1);
                     }
                     break;
                 case 'p':
                     quality_offset = parse_int(argc, argv, &i);
                     if ((quality_offset != 64) && (quality_offset != 33) && (quality_offset != 59)) {
-                        printf("WARNING: Unrecognised FASTQ quality offset... running anyway...\n");
+                        printf("Warning: Unrecognised FASTQ quality offset... running anyway...\n");
                     }
                     break;
                 case 'r':
                     rank_contig_filename = parse_string(argc, argv, &i);
                     if (!rank_contig_filename) {
-                        printf("ERROR: Invalid filename for -r parameter.\n");
+                        printf("Error: Invalid filename for -r parameter.\n");
                         exit(1);
                     }
                     break;
                 case 't':
                     rank_table_filename = parse_string(argc, argv, &i);
                     if (!rank_table_filename) {
-                        printf("ERROR: Invalid filename for -t parameter.\n");
+                        printf("Error: Invalid filename for -t parameter.\n");
                         exit(1);
                     }
                     break;
@@ -3111,7 +3114,7 @@ void parse_command_line_args(int argc, char* argv[])
                     printf("Max line length set to %d bytes.\n", max_line_length);
                     break;
                 default:
-                    printf("ERROR: Invalid parameter %c\n", parameter[1]);
+                    printf("Error: Invalid parameter %c\n", parameter[1]);
                     exit(1);
             }
         }
@@ -3120,22 +3123,22 @@ void parse_command_line_args(int argc, char* argv[])
     }
     
     if ((kmer_size < 1) || (kmer_size > 255)) {
-        printf("ERROR: Invalid kmer size.\n");
+        printf("Error: Invalid kmer size.\n");
         exit(1);
     }
     
-    if (!file_of_filenames) {
-        printf("ERROR: You must specify an input file of files.\n");
-        exit(1);
-    }
+    //if (!file_of_filenames) {
+    //    printf("Error: You must specify an input file of files.\n");
+    //    exit(1);
+    //}
     
     if (!base_filename) {
-        printf("ERROR: You must specify a .gv output file.\n");
+        printf("Error: You must specify a .gv output file.\n");
         exit(1);
     }   
     
     if (!rank_log_filename && !match_selection_filename && !rank_table_filename && !rank_csv_filename && !rank_contig_filename) {
-        printf("ERROR: You must specify at least one output file.\n");
+        printf("Error: You must specify at least one output file.\n");
         exit(1);
     }
 }
@@ -3178,7 +3181,7 @@ void make_test_quality_data(void)
         }
     }
     
-    printf("\n\n\n*** WARNING ***\n Debug mode: Creating test quality data...\n\n\n");
+    printf("\n\n\n*** Warning ***\n Debug mode: Creating test quality data...\n\n\n");
     hash_table_traverse(&make_quality_strings, hash_table);
 }
 #endif
@@ -3191,7 +3194,9 @@ void print_parameter_values(void)
     printf("                Max k: %i\n", (NUMBER_OF_BITFIELDS_IN_BINARY_KMER*32)-1);
     printf("     Input fasta file: %s\n", fasta_filename);
     printf("  Input coverage file: %s\n", coverage_filename);
-    printf("  Input file of files: %s\n", file_of_filenames);
+    if (use_quality_scores) {
+        printf("  Input file of files: %s\n", file_of_filenames);
+    }
     if (match_selection_filename) {
         printf(" Match selection file: %s\n", match_selection_filename);
         printf("Selected matches file: %s\n", selected_matches_filename);
@@ -3236,7 +3241,7 @@ void handler(int sig) {
     // print out all the frames to stderr
     fprintf(stderr, "Error: signal %d:\n", sig);
     backtrace_symbols_fd(array, size, 2);
-    log_printf("\nERROR: signal %d:\n", sig);
+    log_printf("\nError: signal %d:\n", sig);
     exit(1);
 }
 
@@ -3299,8 +3304,11 @@ int main (int argc, char * argv[])
         output_specified_match_contigs(match_selection_filename, selected_matches_filename);
     } else {        
         generate_overall_stats();
-        look_for_quality_scores_in_fastq(file_of_filenames);
-
+        
+        if (use_quality_scores) {
+            look_for_quality_scores_in_fastq(file_of_filenames);
+        }
+        
         #ifdef DEBUG_MAKE_TEST_DATA
         make_test_quality_data();
         #endif
