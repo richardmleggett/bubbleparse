@@ -1417,7 +1417,8 @@ void calculate_probabilities(int m)
             int number_of_quality_scores = qa->number_of_strings;
             
             // Warnings if number of quality scores found in file different to coverage
-            if (number_of_quality_scores != matches[m]->paths[p]->colour_coverage[c]->coverage[first_node]) {
+            if ((matches[m]->paths[p]->colour_coverage[c]->coverage[first_node] > 0) &&
+                (number_of_quality_scores != matches[m]->paths[p]->colour_coverage[c]->coverage[first_node])) {
                 log_printf("Warning: Number of quality scores read (%d) doesn't match expected coverage (%d) for kmer (%s) on match %d, path %d, colour %d\n",
                            number_of_quality_scores,
                            matches[m]->paths[p]->colour_coverage[c]->coverage[first_node],
