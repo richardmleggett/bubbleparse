@@ -535,13 +535,13 @@ void read_next_match(FILE *fp, PreprocessedMatch *match)
                 
                 // Check path number (indexed from 0)
                 if (!end_of_match) {
-                    if (p != match->number_of_paths) {
+                    if (p >= MAX_PATHS_PER_MATCH) {
+                        log_printf("Warning: Match %d path index %d too high (Max %d paths allowed). Path ignored.\n", m, p, MAX_PATHS_PER_MATCH);
+                        ignore_path = 1;
+                    } else if (p != match->number_of_paths) {
                         log_and_screen_printf("Error: nonsequential path number (%d found, expected %d) on match %d.\n", p, match->number_of_paths, m);
                         fclose(fp);
                         exit(1);
-                    } else if (p >= MAX_PATHS_PER_MATCH) {
-                        log_printf("Warning: Match %d path index %d too high (Max %d paths allowed). Path ignored.\n", m, p, MAX_PATHS_PER_MATCH);
-                        ignore_path = 1;
                     }
                 }
                                 
