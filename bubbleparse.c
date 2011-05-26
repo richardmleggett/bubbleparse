@@ -5,9 +5,9 @@
  *          ranked list.                                                *
  *                                                                      *
  * Author:  Richard Leggett                                             *
- *          The Sainsbury Laboratory                                    *
+ *          The Genome Analysis Centre                                  *
  *          Norwich Research Park, Colney, Norwich, NR4 7UH, UK         *
- *          richard.leggett@tsl.ac.uk                                   * 
+ *          richard.leggett@bbsrc.ac.uk                                 * 
  *                                                                      *
  * History: 06-Jul-10: RML: Created                                     *
  *----------------------------------------------------------------------*/
