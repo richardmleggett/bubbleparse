@@ -7,7 +7,7 @@
  * Author:  Richard Leggett                                             *
  *          The Genome Analysis Centre                                  *
  *          Norwich Research Park, Colney, Norwich, NR4 7UH, UK         *
- *          richard.leggett@bbsrc.ac.uk                                 * 
+ *          richard.leggett@tgac.ac.uk                                  * 
  *                                                                      *
  * History: 06-Jul-10: RML: Created                                     *
  *----------------------------------------------------------------------*/
