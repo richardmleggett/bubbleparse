@@ -2646,7 +2646,9 @@ void display_sequence_and_coverage(int m, int width)
 void parse_expected_coverage_string(char *s)
 {
     char* p;
-    int colour, tolerance, path;
+    int colour = -1;
+    int tolerance = -1;
+    int path = -1;
 
     p = strtok(s, ",");
     if (p) {
@@ -2669,7 +2671,12 @@ void parse_expected_coverage_string(char *s)
         } else {
             printf("Error: colour out of range in expected coverage file.\n");
         }
-    }                        
+    }
+    
+    if ((colour == -1) || (tolerance == -1)) {
+        printf("Error: badly formatted options file.\n");
+        exit(1);
+    }
 }
 
 /*----------------------------------------------------------------------*
@@ -2705,6 +2712,17 @@ void read_options_file(void)
                 make_upper_case(line);
                 param = strtok(line, " ");
                 value = strtok(NULL, "\"");
+
+                if ((!param) || (!value)) {
+                    printf("Error: badly formatted options file. Please consult manual.\n");
+                    exit(1);
+                }
+                
+                if ((value[0] == '\'') || (value[strlen(value)-1] == '\'')) {
+                    printf("Error: badly formatted options file. Use \" instead of \'\n");
+                    exit(1);                    
+                }
+                                
                 if (strcmp(param, "EXPECTEDCOVERAGE") == 0) {
                     if (value) {
                         parse_expected_coverage_string(value);
@@ -2725,8 +2743,6 @@ void read_options_file(void)
     log_write_timestamp(0);
     log_printf(" ENDED Read options file\n");
 }
-
-
 
 /*----------------------------------------------------------------------*
  * Function: output_specified_match_contigs                             *
