@@ -2,12 +2,20 @@
  * File:    bubbleparse.c                                               *
  *                                                                      *
  * Purpose: Parse files output by cortex bubble finding and produce     *
- *          ranked list.                                                *
+ *          ranked list of SNPs.                                        *
  *                                                                      *
  * Author:  Richard Leggett                                             *
  *          The Genome Analysis Centre                                  *
  *          Norwich Research Park, Colney, Norwich, NR4 7UH, UK         *
  *          richard.leggett@tgac.ac.uk                                  * 
+ *                                                                      *
+ * License: Bubbleparse is free software, distributed under the GNU     *
+ *          Public License v3 http://www.gnu.org/licenses/              *
+ *          Bubbleparse is distributed in the hope that it will be      *
+ *          useful, but WITHOUT ANY WARRANTY; without even the implied  *
+ *          warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR     *
+ *          PURPOSE. See the GNU General Public License for more        *
+ *          details.                                                    *
  *                                                                      *
  * History: 06-Jul-10: RML: Created                                     *
  *----------------------------------------------------------------------*/
@@ -54,20 +62,30 @@
  *----------------------------------------------------------------------*/
 typedef struct {
     int* coverage;
+    int  size;
 } CoverageArray;
 
 typedef struct {
     char type[16];
+#ifdef USE_CPNP_RANKING
     long double cpnp;
+#endif
     short flags;
     int q_total;
+    double q_average;
+#ifdef USE_P_VALUE
     long double p_ratio[2];
     long double p_value[MAX_PATHS_PER_MATCH][MAX_COLOURS];
+#endif
     short coverage_complete[MAX_PATHS_PER_MATCH][MAX_COLOURS];
     double coverage_av[MAX_PATHS_PER_MATCH][MAX_COLOURS];
     double coverage_pc[MAX_PATHS_PER_MATCH][MAX_COLOURS];
     double coverage_difference[MAX_COLOURS];
     double combined_coverage;
+    double highest_bp_ratio;
+    int highest_bp_coverage;
+    int broken_paths;
+    char bp_ratio_within_bounds;
 } RankingStats;
 
 typedef struct {
@@ -142,13 +160,20 @@ char* rank_log_filename = 0;
 char* debug_log_filename = 0;
 char selected_matches_filename[4096];
 int minimum_contig_size = 0;
-int quality_offset = 64;
 int n_length_adjusted = 0;
 int n_kmers_already = 0;
 int deduplicate = 0;
 int use_quality_scores = 0;
 int n_deduplicates = 0;
 int max_line_length = 8*1024*1024;
+long long int coverage_count = 0;
+long long int coverage_nt = 0;
+int mean_coverage = 0;
+int rank_on_q_average = FALSE;
+int rank_on_bp_coverage = FALSE;
+int rank_on_broken_paths = TRUE;
+float bp_coverage_min = 0.8;
+float bp_coverage_max = 1.2;
 
 /*----------------------------------------------------------------------*
  * Table column widths                                                  *
@@ -356,12 +381,12 @@ void get_first_and_last_kmers(char* line, int m, int p)
     
     // First 
     if (k_offset < 0) {
-        printf("Error: match %i path %i, pre too small (%i). Is kmer size correct?\n", m, p, pre);
+        log_and_screen_printf("Error: match %i path %i, pre too small (%i). Is kmer size correct?\n", m, p, pre);
         exit(1);
     }
     
     if (strlen(line) < (k_offset + kmer_size)) {
-        printf("Error: match %i path %i, line too short (%i)\n", m, p, k_offset + kmer_size);
+        log_and_screen_printf("Error: match %i path %i, line too short (%i)\n", m, p, k_offset + kmer_size);
         exit(1);
     }
     
@@ -372,7 +397,7 @@ void get_first_and_last_kmers(char* line, int m, int p)
    if (!matches[m]->paths[p]->first_bubble_kmer ||
        !matches[m]->paths[p]->first_contig_kmer ||
        !matches[m]->paths[p]->last_contig_kmer) {
-        printf("Error: can't get memory to store first/last kmer\n");
+        log_and_screen_printf("Error: can't get memory to store first/last kmer\n");
         exit(1);
     }
     
@@ -383,7 +408,7 @@ void get_first_and_last_kmers(char* line, int m, int p)
     for (i=0; i<strlen(matches[m]->paths[p]->first_bubble_kmer); i++) {
         char c = toupper(matches[m]->paths[p]->first_bubble_kmer[i]);
         if (c != 'A' && c != 'C' && c != 'G' && c != 'T') {
-            printf("Error: bad character in match %i path %i (%c)\n", m, p, c);
+            log_and_screen_printf("Error: bad character in match %i path %i (%c)\n", m, p, c);
             exit(1);
         }
     }
@@ -431,7 +456,7 @@ void preprocess_match(PreprocessedMatch *match)
     } while (!found_difference && !reached_end);
 
     if (reached_end) {
-        printf("Error: Reached end of string while preprocessing match %d.\n", match->match_number);
+        log_and_screen_printf("Error: Reached end of string while preprocessing match %d.\n", match->match_number);
         exit(1);
     }    
     
@@ -457,7 +482,7 @@ void preprocess_match(PreprocessedMatch *match)
     } while (!found_difference && !reached_end);
     
     if (reached_end) {
-        printf("Error: Reached end of string while preprocessing match %d.\n", match->match_number);
+        log_and_screen_printf("Error: Reached end of string while preprocessing match %d.\n", match->match_number);
         exit(1);
     }
     
@@ -484,7 +509,7 @@ void preprocess_match(PreprocessedMatch *match)
                        match->paths[p].length, match->paths[p].pre, match->paths[p].mid, match->paths[p].post, match->match_number, p);
             
             if (match->paths[p].mid < 0) {
-                printf("Error: calculated mid length wrong for match %d path %d. Is kmer size correct?\n", match->match_number, p);
+                log_and_screen_printf("Error: calculated mid length wrong for match %d path %d. Is kmer size correct?\n", match->match_number, p);
                 exit(1);
             }
             
@@ -598,11 +623,11 @@ void read_fasta_file(char* filename)
     log_write_timestamp(0);
     log_printf(" START Read FASTA file\n");
     
-    printf("Reading FASTA file...\n");
+    log_and_screen_printf("Reading FASTA file...\n");
     
     fp = fopen(filename, "r");
     if (!fp) {
-        printf("Error: Can't open FASTA file.\n");
+        log_and_screen_printf("Error: Can't open FASTA file.\n");
         exit(1);
     }
     
@@ -612,7 +637,7 @@ void read_fasta_file(char* filename)
 
         if (m != -1) {
             if (m != number_of_matches) {
-                printf("Error: Non-sequential match numbers: Found %d expected %d.\n", m, number_of_matches);
+                log_and_screen_printf("Error: Non-sequential match numbers: Found %d expected %d.\n", m, number_of_matches);
                 fclose(fp);
                 exit(1);
             }
@@ -624,7 +649,7 @@ void read_fasta_file(char* filename)
                 int i;
                 
                 if (!new_matches) {
-                    printf("Error: Out of memory trying to store match %d.\n", m);
+                    log_and_screen_printf("Error: Out of memory trying to store match %d.\n", m);
                     fclose(fp);
                     exit(1);
                 }
@@ -644,7 +669,7 @@ void read_fasta_file(char* filename)
                 matches[m] = calloc(1, sizeof(Match));
                 
                 if (!matches[m]) {
-                    printf("Error: couldn't get memory for Match structure.\n");
+                    log_and_screen_printf("Error: couldn't get memory for Match structure.\n");
                     fclose(fp);
                     exit(1);
                 }
@@ -671,7 +696,7 @@ void read_fasta_file(char* filename)
                 if (matches[m]->paths[p] == 0) {
                     matches[m]->paths[p] = malloc(sizeof(MatchPath));
                     if (!matches[m]->paths[p]) {
-                        printf("Error: couldn't get memory for MatchPath structure.\n");
+                        log_and_screen_printf("Error: couldn't get memory for MatchPath structure.\n");
                         fclose(fp);
                         exit(1);
                     }
@@ -679,7 +704,7 @@ void read_fasta_file(char* filename)
                         
                 #ifndef DEBUG_MAC
                 if (l != (pre+mid+post)) {
-                    printf("  Match %d path %d: pre, mid, post (%d, %d, %d) don't add up to length (%d)\n", m, p, pre, mid, post, l);
+                    log_and_screen_printf("  Match %d path %d: pre, mid, post (%d, %d, %d) don't add up to length (%d)\n", m, p, pre, mid, post, l);
                 }                   
                 #endif
 
@@ -696,7 +721,7 @@ void read_fasta_file(char* filename)
                 if ((!matches[m]->paths[p]->contig_pre) ||
                     (!matches[m]->paths[p]->contig_mid) ||
                     (!matches[m]->paths[p]->contig_post)) {
-                    printf("Error: couldn't allocate memory for contig (lengths %d, %d, %d)!\n", pre, mid, post);
+                    log_and_screen_printf("Error: couldn't allocate memory for contig (lengths %d, %d, %d)!\n", pre, mid, post);
                     exit(1);
                 }
                 strcpy_upper(matches[m]->paths[p]->contig_pre, line, pre);                  
@@ -740,17 +765,17 @@ void read_fasta_file(char* filename)
     log_write_timestamp(0);
     log_printf(" START Read FASTA file\n");
 
-    printf("Reading FASTA file...\n");
+    log_and_screen_printf("Reading FASTA file...\n");
 
     line = malloc(max_line_length);
     if (!line) {
-        printf("Error: Insufficient memory to allocate space to store line.\n");
+        log_and_screen_printf("Error: Insufficient memory to allocate space to store line.\n");
         exit(1);
     }   
     
     fp = fopen(filename, "r");
     if (!fp) {
-        printf("Error: Can't open FASTA file.\n");
+        log_and_screen_printf("Error: Can't open FASTA file.\n");
         exit(1);
     }
     
@@ -763,7 +788,7 @@ void read_fasta_file(char* filename)
 
                 // Check for sequential match numbers
                 if ((m != current_match) && (m != (current_match+1))) {
-                    printf("Error: Missing match data? Went from %d to %d.\n", current_match, m);
+                    log_and_screen_printf("Error: Missing match data? Went from %d to %d.\n", current_match, m);
                     fclose(fp);
                     exit(1);
                 }
@@ -775,7 +800,7 @@ void read_fasta_file(char* filename)
                     int i;
                                         
                     if (!new_matches) {
-                        printf("Error: Out of memory trying to store match %d.\n", m);
+                        log_and_screen_printf("Error: Out of memory trying to store match %d.\n", m);
                         fclose(fp);
                         exit(1);
                     }
@@ -793,14 +818,14 @@ void read_fasta_file(char* filename)
                                 
                 // Check for missing path 0.
                 if ((m != current_match) && (p != 0)) {
-                    printf("Error: found path %d before path 0 on match %d.\n", p, m);
+                    log_and_screen_printf("Error: found path %d before path 0 on match %d.\n", p, m);
                     fclose(fp);
                     exit(1);
                 }
                 
                 // Check for sequential path numbers
                 if ((m == current_match) && (p != (current_path+1))) {
-                    printf("Error: found path %d before path %d on match %d.\n", p, current_path+1, m);
+                    log_and_screen_printf("Error: found path %d before path %d on match %d.\n", p, current_path+1, m);
                     fclose(fp);
                     exit(1);
                 }
@@ -814,12 +839,12 @@ void read_fasta_file(char* filename)
                 pos = ftell(fp);                
                 if (fgets(line, max_line_length, fp)) {
                     if ((strlen(line) == max_line_length) && (line[max_line_length-1] != '\n')) {
-                        printf("Error: line length for match %d path %d too long. Try increasing with -y [int kb].\n", m, p);
+                        log_and_screen_printf("Error: line length for match %d path %d too long. Try increasing with -y [int kb].\n", m, p);
                         exit(1);
                     }
                     
                     if (!clean_and_check_sequence(line)) {
-                        printf("Error: Strange contig data for match %d path %d.\n", m, p);
+                        log_and_screen_printf("Error: Strange contig data for match %d path %d.\n", m, p);
                         fclose(fp);
                         exit(1);
                     }
@@ -830,7 +855,7 @@ void read_fasta_file(char* filename)
                             matches[m] = calloc(1, sizeof(Match));
                             current_path = -1;
                             if (!matches[m]) {
-                                printf("Error: couldn't get memory for Match structure.\n");
+                                log_and_screen_printf("Error: couldn't get memory for Match structure.\n");
                                 fclose(fp);
                                 exit(1);
                             }
@@ -842,7 +867,7 @@ void read_fasta_file(char* filename)
                         if (matches[m]->paths[p] == 0) {
                             matches[m]->paths[p] = malloc(sizeof(MatchPath));
                             if (!matches[m]->paths[p]) {
-                                printf("Error: couldn't get memory for MatchPath structure.\n");
+                                log_and_screen_printf("Error: couldn't get memory for MatchPath structure.\n");
                                 fclose(fp);
                                 exit(1);
                             }
@@ -850,7 +875,7 @@ void read_fasta_file(char* filename)
                         
                         #ifndef DEBUG_MAC
                         if (l != (pre+mid+post)) {
-                            printf("  Match %d path %d: pre, mid, post (%d, %d, %d) don't add up to length (%d)\n", m, p, pre, mid, post, l);
+                            log_and_screen_printf("  Match %d path %d: pre, mid, post (%d, %d, %d) don't add up to length (%d)\n", m, p, pre, mid, post, l);
                         }                   
                         #endif
                         
@@ -860,7 +885,7 @@ void read_fasta_file(char* filename)
                         if ((!matches[m]->paths[p]->contig_pre) ||
                             (!matches[m]->paths[p]->contig_mid) ||
                             (!matches[m]->paths[p]->contig_post)) {
-                            printf("Error: couldn't allocate memory for contig!\n");
+                            log_and_screen_printf("Error: couldn't allocate memory for contig!\n");
                             exit(1);
                         }
                         strcpy_upper(matches[m]->paths[p]->contig_pre, line, pre);                  
@@ -882,13 +907,10 @@ void read_fasta_file(char* filename)
                         matches[m]->paths[p]->post = post;
                         matches[m]->flags = 0;
                         matches[m]->paths[p]->flags = 0;
-                        //strncpy(matches[m]->paths[p]->first_bubble_kmer, line+pre-kmer_size+1, kmer_size);
-                        //matches[m]->paths[p]->first_bubble_kmer[kmer_size] = 0;   
-                        //matches[m]->paths[p]->first_bubble_kmer_offset = kmer_size-1;
                         get_first_and_last_kmers(line, m, p);
                     }
                 } else {
-                    printf("Error: couldn't find a contig for match %d path %d.\n", m, p);
+                    log_and_screen_printf("Error: couldn't find a contig for match %d path %d.\n", m, p);
                     fclose(fp);
                     exit(1);
                 }
@@ -918,25 +940,30 @@ int parse_coverage_line(int m, int p, int c, char* line)
     
     cov = malloc(sizeof(CoverageArray));
     if (!cov) {
-        printf("Error: couldn't allocate memory to store coverage array.\n");
+        log_and_screen_printf("Error: couldn't allocate memory to store coverage array.\n");
         return 0;
     }
+    cov->size = 0;
     matches[m]->paths[p]->colour_coverage[c] = cov;
     
     cov->coverage = calloc(matches[m]->paths[p]->contig_length, sizeof(int));
     if (!cov->coverage) {
-        printf("Error: couldn't allocate memory to store coverage.\n");
+        log_and_screen_printf("Error: couldn't allocate memory to store coverage.\n");
         return 0;
     }
+    cov->size = matches[m]->paths[p]->contig_length;
     
     s = strtok(line, " ");
     while (s) {
+        int c = atoi(s);
         if (s) {
             if (n < matches[m]->paths[p]->contig_length) {
-                cov->coverage[n++] = atoi(s);
+                cov->coverage[n++] = c;
+                coverage_count+=c;
+                coverage_nt++;
             } else {
-                printf("Error: too many coverage values for match %d path %d colour %d.\n", m, p, c);
-                printf("%d %d", n, matches[m]->paths[p]->contig_length);
+                log_and_screen_printf("Error: too many coverage values for match %d path %d colour %d.\n", m, p, c);
+                log_and_screen_printf("%d %d", n, matches[m]->paths[p]->contig_length);
                 return 0;
             }
         }
@@ -944,8 +971,12 @@ int parse_coverage_line(int m, int p, int c, char* line)
     }
             
     if (n != matches[m]->paths[p]->contig_length) {
-        printf("Error: not enough coverage values for match %d path %d colour %d. Expected %d, found %d.\n", m, p, c, matches[m]->paths[p]->contig_length, n);
-        return 0;
+        int difference = abs(matches[m]->paths[p]->contig_length) - n;
+        log_and_screen_printf("Error: not enough coverage values for match %d path %d colour %d. Expected %d, found %d.\n", m, p, c, matches[m]->paths[p]->contig_length, n);
+        // Can be out by one, due to cortex_bub error. Anything more is worrying...
+        if (difference > 1) {
+            return 0;
+        }
     }
         
     return 1;
@@ -971,17 +1002,17 @@ void read_coverage_file(char* filename)
     log_write_timestamp(0);
     log_printf(" START Read coverage file\n");
     
-    printf("\nReading coverage file...\n");
+    log_and_screen_printf("\nReading coverage file...\n");
 
     line = malloc(max_line_length);
     if (!line) {
-        printf("Error: Insufficient memory to allocate space to store line.\n");
+        log_and_screen_printf("Error: Insufficient memory to allocate space to store line.\n");
         exit(1);
     }        
     
     fp = fopen(filename, "r");
     if (!fp) {
-        printf("Error: Can't open coverage file.\n");
+        log_and_screen_printf("Error: Can't open coverage file.\n");
         exit(1);
     }
 
@@ -992,13 +1023,13 @@ void read_coverage_file(char* filename)
                 sscanf(line, ">match_%d_path_%d", &m, &p);
                 
                 if (m > (number_of_matches-1)) {
-                    printf("Error: Match number %d too high.\n", m);
+                    log_and_screen_printf("Error: Match number %d too high.\n", m);
                     fclose(fp);
                     exit(1);
                 }
 
                 if (matches[m] == 0) {
-                    printf("Error: Match number %d doesn't exist in FASTA file.\n", m);
+                    log_and_screen_printf("Error: Match number %d doesn't exist in FASTA file.\n", m);
                     fclose(fp);
                     exit(1);
                 }
@@ -1008,25 +1039,25 @@ void read_coverage_file(char* filename)
                 }
                 
                 if ((ignore_path == 0) && (p >= matches[m]->number_of_paths)) {
-                    printf("Error: Match %d path %d doesn't exist in FASTA file.\n", m, p);
+                    log_and_screen_printf("Error: Match %d path %d doesn't exist in FASTA file.\n", m, p);
                     fclose(fp);
                     exit(1);
                 }
                                                 
                 if ((m != current_match) && (m != (current_match+1))) {
-                    printf("Error: Missing match data? Went from %d to %d.\n", current_match, m);
+                    log_and_screen_printf("Error: Missing match data? Went from %d to %d.\n", current_match, m);
                     fclose(fp);
                     exit(1);
                 }
                 
                 if ((m != current_match) && (p != 0)) {
-                    printf("Error: found path %d before path 0 on match %d.\n", p, m);
+                    log_and_screen_printf("Error: found path %d before path 0 on match %d.\n", p, m);
                     fclose(fp);
                     exit(1);
                 }
                 
                 if ((m == current_match) && (p != (current_path+1))) {
-                    printf("Error: found path %d before path %d on match %d.\n", p, current_path+1, m);
+                    log_and_screen_printf("Error: found path %d before path %d on match %d.\n", p, current_path+1, m);
                     fclose(fp);
                     exit(1);
                 }
@@ -1035,7 +1066,7 @@ void read_coverage_file(char* filename)
                 for (c=0; c<number_of_colours; c++) {
                     if (get_next_line(line, max_line_length, fp)) {                        
                         if ((strlen(line) == max_line_length-1) && (line[max_line_length-1] != '\n')) {
-                            printf("Error: line length for match %d path %d too long. Try increasing with -y [int kb].\n", m, p);
+                            log_and_screen_printf("Error: line length for match %d path %d too long. Try increasing with -y [int kb].\n", m, p);
                             exit(1);
                         }
                         
@@ -1050,7 +1081,7 @@ void read_coverage_file(char* filename)
                             }
                         }
                     } else {
-                        printf("Error: couldn't find a contig for match %d path %d.\n", m, p);
+                        log_and_screen_printf("Error: couldn't find a contig for match %d path %d.\n", m, p);
                         fclose(fp);
                         exit(1);
                     }
@@ -1074,7 +1105,7 @@ void read_coverage_file(char* filename)
                             // If not found, insert it
                             Element * current_entry = hash_table_insert(element_get_key(&b, kmer_size, &tmp_kmer), hash_table); 
                             if (current_entry == NULL) {
-                                printf("Error: couldn't add kmer to hash table.\n");
+                                log_and_screen_printf("Error: couldn't add kmer to hash table.\n");
                                 fclose(fp);
                                 exit(1);
                             }
@@ -1193,14 +1224,18 @@ double get_average_bubble_coverage(int m, int p, int c, short* coverage_complete
     int end = start + matches[m]->paths[p]->mid;
     double average = 0.0;
 
-    *coverage_complete = 1;
+    if (ca != 0) {
+        *coverage_complete = 1;
     
-    for (i=start; i<end; i++) {
-        total = total + ca->coverage[i];
+        for (i=start; i<end; i++) {
+            total = total + ca->coverage[i];
         
-        if (ca->coverage[i] == 0) {
-            *coverage_complete = 0;
+            if (ca->coverage[i] == 0) {
+                *coverage_complete = 0;
+            }
         }
+    } else {
+        log_printf("Warning: match %d path %d, no coverage array.\n", m, p);
     }
     
     if (total == 0) {
@@ -1240,7 +1275,7 @@ char* get_quality_scores_string(char* kmer_string, char* output_string, int offs
     seq_to_binary_kmer(kmer_string, kmer_size, &b); 
     Element *e = hash_table_find(element_get_key(&b, kmer_size, &tmp_kmer), hash_table);
     if (e == NULL) {
-        printf("Error: can't find kmer %s\n", kmer_string);
+        log_and_screen_printf("Error: can't find kmer %s\n", kmer_string);
         exit(1);
     }
     
@@ -1258,7 +1293,7 @@ char* get_quality_scores_string(char* kmer_string, char* output_string, int offs
         }
         
         if (as_numbers) {
-            sprintf(tmp_string, "%d", qs[offset]-quality_offset);
+            sprintf(tmp_string, "%d", qs[offset]-33);
         } else {
             sprintf(tmp_string, "%c", qs[offset]);
         }
@@ -1323,7 +1358,7 @@ short p_to_q(double p)
 
 char p_to_q_char(double p)
 {
-    return p_to_q(p)+quality_offset;
+    return p_to_q(p)+33;
 }
 
 double q_to_p(double q)
@@ -1333,7 +1368,7 @@ double q_to_p(double q)
 
 double char_q_to_p(char c)
 {
-    double q = c - quality_offset;
+    double q = c - 33;
     return q_to_p(q);
 }
 
@@ -1372,11 +1407,16 @@ void calculate_probabilities(int m)
     int c, i, p;
     int first_node;
     short total_coverage;
-    long double combined_p;
-    long double cpnp = 1.0;
+#ifdef USE_P_VALUE
     long double pn;
     long double num, den;
+#endif
     char* kmer_string;
+#ifdef USE_CPNP_RANKING
+    long double combined_p;
+    long double cpnp = 1.0;
+#endif
+    int n_q = 0;
 
     // Check all paths are kmer size...
     if (!check_all_paths_at_least_kmer_size(m)) {
@@ -1384,6 +1424,7 @@ void calculate_probabilities(int m)
     }
     
     matches[m]->statistics.q_total = 0;
+    matches[m]->statistics.q_average = 0;
     
     // Build up an array of p_values
     for (p=0; p<matches[m]->number_of_paths; p++)
@@ -1400,7 +1441,7 @@ void calculate_probabilities(int m)
         seq_to_binary_kmer(kmer_string, kmer_size, &b); 
         Element *e = hash_table_find(element_get_key(&b, kmer_size, &tmp_kmer), hash_table);
         if (e == NULL) {
-            printf("Error: can't find kmer %s\n", kmer_string);
+            log_and_screen_printf("Error: can't find kmer %s\n", kmer_string);
             exit(1);
         }
         
@@ -1442,9 +1483,11 @@ void calculate_probabilities(int m)
             // Sum up quality scores - these become the exponent
             for (i=0; i<qa->number_of_strings; i++) {
                 char* qs = qa->quality_strings[i].quality;
-                q_total += qs[matches[m]->paths[p]->first_bubble_kmer_offset]-quality_offset;
+                q_total += qs[matches[m]->paths[p]->first_bubble_kmer_offset]-33;
+                n_q++;
             }
-                        
+            
+#ifdef USE_CPNP_RANKING            
             // Workout combined (combination of quality scores) p-value for this path and colour
             combined_p = powl(10.0, (q_total/-10));
             combined_p *= matches[m]->paths[p]->colour_coverage[c]->coverage[first_node]; 
@@ -1454,17 +1497,19 @@ void calculate_probabilities(int m)
             // this path and colour is correct is 1-combined_p. The CPNP is obtained by
             // multiplying all these values together.
             cpnp *= (1-combined_p);
-            
+#endif
+
             // Alternative to CPNP - total quality score
             
             // Update Q total
             matches[m]->statistics.q_total += q_total;
 
+#ifdef USE_P_VALUE
             // Another alternative - sum up the probabilities
             pn = 0;
             for (i=0; i<qa->number_of_strings; i++) {
                 char* qs = qa->quality_strings[i].quality;
-                int qi = qs[matches[m]->paths[p]->first_bubble_kmer_offset]-quality_offset;
+                int qi = qs[matches[m]->paths[p]->first_bubble_kmer_offset]-33;
                 pn = pn + (1 - powl(10.0, (qi/-10)));
             }
             if (matches[m]->statistics.coverage_complete[p][c]) {
@@ -1472,9 +1517,13 @@ void calculate_probabilities(int m)
             } else {
                 matches[m]->statistics.p_value[p][c] = 0;
             }
+#endif
         }
     }
-    
+
+    matches[m]->statistics.q_average = matches[m]->statistics.q_total / n_q;
+   
+#ifdef USE_P_VALUE 
     // Now work out the p ratios
     for (c=0; c<number_of_colours; c++) {
         if (matches[m]->number_of_paths == 2) {
@@ -1496,8 +1545,11 @@ void calculate_probabilities(int m)
             matches[m]->statistics.p_ratio[1] = 0;
         }
     }
-    
+#endif
+   
+#ifdef USE_CPNP_RANKING 
     matches[m]->statistics.cpnp = cpnp;
+#endif
 }
 
 /*----------------------------------------------------------------------*
@@ -1549,11 +1601,15 @@ void find_type(int m)
         c_on_p[p] = 0;
     }
     
+    matches[m]->statistics.broken_paths = 0;
+    
     // Work out how many colours on each path
     for (p=0; p<matches[m]->number_of_paths; p++) {
         for (c=0; c<number_of_colours; c++) {
             if (matches[m]->statistics.coverage_complete[p][c]) {
                 c_on_p[p]++;
+            } else if (matches[m]->statistics.coverage_av[p][c] > 0) {
+                matches[m]->statistics.broken_paths++;
             }
         }
     }
@@ -1626,6 +1682,9 @@ void score_matches(void)
     double lowest;
     FILE *fp = 0;
     char qs_string[1024];
+    int left_cov, right_cov;
+    int left_node, right_node;
+    int hbc;
     
     log_newline();
     log_write_timestamp(0);
@@ -1634,22 +1693,24 @@ void score_matches(void)
     if (rank_log_filename) {
         fp = fopen(rank_log_filename, "w");
         if (!fp) {
-            printf("Error: Can't open scoring log.\n");
+            log_and_screen_printf("Error: Can't open scoring log.\n");
             exit(1);
         }
     }
     
-    printf("\nScoring matches...\n");
+   log_and_screen_printf("\nScoring matches...\n");
     
     for (m=0; m<number_of_matches; m++) {        
-        if (((m % 100000) == 0) || (m == number_of_matches-1)) {
-            log_printf("Reached match %d\n", m);
-        }
+        log_printf("Match %d of %d\n", m, number_of_matches);
+ 
+        //if (((m % 100000) == 0) || (m == number_of_matches-1)) {
+        //    log_printf("Reached match %d\n", m);
+        //}
         
-        //log_printf("Match %d...", m);
         matches[m]->statistics.combined_coverage = 0;
         if (!(matches[m]->flags & FLAG_IGNORE)) {
             // Clear coverage matrix
+            //log_printf("\tCheckpoint 1\n");
             for (p=0; p<MAX_PATHS_PER_MATCH; p++) {
                 for (c=0; c<number_of_colours; c++) {
                     matches[m]->statistics.coverage_av[p][c] = 0;
@@ -1657,19 +1718,17 @@ void score_matches(void)
                 }
             }
             
-            //log_printf(" 1");
-
             // Fill coverage matrix
+            //log_printf("\tCheckpoint 2\n");
             for (c=0; c<number_of_colours; c++) {
                 for (p=0; p<matches[m]->number_of_paths; p++) {
                     matches[m]->statistics.coverage_av[p][c] = get_average_bubble_coverage(m, p, c, &(matches[m]->statistics.coverage_complete[p][c]));
                     matches[m]->statistics.combined_coverage += matches[m]->statistics.coverage_av[p][c];
                 }
             }
-
-            //log_printf(" 2");
             
             // Check if bubble paths are the same length
+            //log_printf("\tCheckpoint 3\n");
             set_flag(&matches[m]->statistics.flags, FLAG_PATHS_SAME_LENGTH);
             matches[m]->longest_contig = 0;
             for (p=1; p<matches[m]->number_of_paths; p++) {
@@ -1680,10 +1739,9 @@ void score_matches(void)
                     matches[m]->longest_contig = matches[m]->paths[p]->contig_length;
                 }
             }
-
-            //log_printf(" 3");
             
             // Make it a percentage
+            //log_printf("\tCheckpoint 4\n");
             lowest = 100.0;
             for (c=0; c<number_of_colours; c++) {
                 total = 0.0;
@@ -1709,15 +1767,13 @@ void score_matches(void)
                     lowest = 0;
                 }
             }
-
-            //log_printf(" 4");
             
             // Find type
+            //log_printf("\tCheckpoint 5\n");
             find_type(m);
-
-            //log_printf(" 5");
             
             // Check if coverage percentage within tolerance
+            //log_printf("\tCheckpoint 6\n");
             calculate_coverage_difference(m);
             set_flag(&matches[m]->statistics.flags, FLAG_COVERAGE_WITHIN_BOUNDS);
             for (c=0; c<number_of_colours; c++) {
@@ -1727,25 +1783,67 @@ void score_matches(void)
                 }
             }
 
-            //log_printf(" 6");
-            
             // Calculate probabilities for ranking
+            //log_printf("\tCheckpoint 7\n");
             calculate_probabilities(m);
                         
-            //log_printf(" 7");
+            // Find branch node highest coverage - if there's a problem, default to average coverage
+            left_node = matches[m]->paths[0]->pre - 1;
+            right_node = matches[m]->paths[0]->pre + matches[m]->paths[0]->mid;
+            left_cov = 0;
+            right_cov = 0;
+            hbc = mean_coverage;
+
+            //log_printf("\tAbout to do repeat scoring\n");
+            //log_printf("\t\tMatch %d", m);
+            //log_printf("\tpre %d", matches[m]->paths[0]->pre);
+            //log_printf("\tmod %d", matches[m]->paths[0]->mid);
+            //log_printf("\tpost %d", matches[m]->paths[0]->post);
+            //log_printf("\tcontig_length %d", matches[m]->paths[0]->contig_length);
+            //log_printf("\tleft_node %d", left_node);
+            //log_printf("\tright_node %d", right_node);
+            //log_printf("\tcov size 0 %d", matches[m]->paths[0]->colour_coverage[0]->size);
+            //log_printf("\tcov size 1 %d\n", matches[m]->paths[0]->colour_coverage[1]->size);
+
+            if ((right_node < matches[m]->paths[0]->colour_coverage[0]->size) &&
+                (right_node < matches[m]->paths[0]->colour_coverage[1]->size)) {
+                for (c=0; c<number_of_colours; c++) {
+                    //log_printf("\t\tColour %d\n", c);
+                    left_cov += matches[m]->paths[0]->colour_coverage[c]->coverage[left_node];
+                    right_cov += matches[m]->paths[0]->colour_coverage[c]->coverage[right_node];
+                }
             
+                if (left_cov > right_cov) {
+                    hbc = left_cov;
+                } else {
+                    hbc = right_cov;                
+                }
+            } else {
+                log_printf("Warning: right_node > contig_length\n");
+            }
+            
+            matches[m]->statistics.highest_bp_coverage = hbc;
+            matches[m]->statistics.highest_bp_ratio = hbc / (double)mean_coverage;
+            if ((matches[m]->statistics.highest_bp_ratio >= bp_coverage_min) && (matches[m]->statistics.highest_bp_ratio <= bp_coverage_max)) {
+                matches[m]->statistics.bp_ratio_within_bounds = 1;
+            } else {
+                matches[m]->statistics.bp_ratio_within_bounds = 0;
+            }
+
+            //log_printf("\tCheckpoint 8\n");
+
             // Output to log file
             if (rank_log_filename) {
                 fprintf(fp, "Match %d\n", m);
                 fprintf(fp, "  Type: %s\n", matches[m]->statistics.type);
 
-    #ifdef USE_CPNP_RANKING
+#ifdef USE_CPNP_RANKING
                 fprintf(fp, "  CPNP: %Le\n", matches[m]->statistics.cpnp);
-    #endif
+#endif
                 
                 for (p=0; p<matches[m]->number_of_paths; p++) {
                     if (strlen(matches[m]->paths[p]->first_bubble_kmer) != kmer_size) {
-                        printf("Error: match %d path %d first kmer (%s) not equal to kmer_size\n", m, p, matches[m]->paths[p]->first_bubble_kmer);
+                        log_and_screen_printf("Error: match %d path %d first kmer (%s) not equal to kmer_size\n", m, p, matches[m]->paths[p]->first_bubble_kmer);
                         exit(1);
                     }
                     
@@ -1763,17 +1861,20 @@ void score_matches(void)
                     }
                 }           
             }
+            //log_printf("\tEnd loop\n");
         }
-        
-        //log_printf(" 8\n");
-
+       
+        //log_printf("\tCheckpoint 9\n");
+ 
         if (rank_log_filename) {
             fprintf(fp, "\n");
         }
+
+        //log_printf("\tCheckpoint 10\n");
     }
     
-    printf("Kmers with no. quality scores > coverage: %d\n", no_match_high);
-    printf("Kmers with no. quality scores < coverage: %d\n", no_match_low);
+    log_and_screen_printf("Kmers with no. quality scores > coverage: %d\n", no_match_high);
+    log_and_screen_printf("Kmers with no. quality scores < coverage: %d\n", no_match_low);
 
     if ((rank_log_filename) && (fp)) {
         fclose(fp);
@@ -1867,6 +1968,13 @@ int match_rank(const void *a, const void *b)
     } else if ((ma->statistics.flags & FLAG_COVERAGE_WITHIN_BOUNDS) && (!(mb->statistics.flags & FLAG_COVERAGE_WITHIN_BOUNDS))) {
         return -1;
     }
+    
+    // We want the 'non-paths' to be zero coverage, not just broken paths
+    if (rank_on_broken_paths) {
+        if (mb->statistics.broken_paths != ma->statistics.broken_paths) {
+            return ma->statistics.broken_paths - mb->statistics.broken_paths;
+        }         
+    }
 
 #ifdef USE_CPNP_RANKING
     // On CPNP
@@ -1876,11 +1984,25 @@ int match_rank(const void *a, const void *b)
         return 1;
     }
 #endif
-    
-    // On total Q
-    if (mb->statistics.q_total != ma->statistics.q_total)
-        return mb->statistics.q_total - ma->statistics.q_total;
-    
+   
+    // Rank on branch point coverage ratio
+    if (rank_on_bp_coverage) {
+        if (mb->statistics.bp_ratio_within_bounds != ma->statistics.bp_ratio_within_bounds) {
+            return mb->statistics.bp_ratio_within_bounds - ma->statistics.bp_ratio_within_bounds;
+        } 
+    }
+ 
+    // Rank on Q average or Q total
+    if (rank_on_q_average) {
+        if (mb->statistics.q_average != ma->statistics.q_average) {
+            return mb->statistics.q_average - ma->statistics.q_average;
+        } 
+    } else {
+        if (mb->statistics.q_total != ma->statistics.q_total) {
+            return mb->statistics.q_total - ma->statistics.q_total;
+        }    
+    }
+
     // On combined coverage
     return mb->statistics.combined_coverage - ma->statistics.combined_coverage;
 }
@@ -1897,7 +2019,7 @@ void rank_matches(void)
     log_write_timestamp(0);
     log_printf(" START Rank matches\n");
 
-    printf("\nSorting matches...\n");
+    log_and_screen_printf("\nSorting matches...\n");
     
     qsort(matches, number_of_matches, sizeof(Match*), match_rank);
 
@@ -2176,24 +2298,24 @@ void output_rank_table(void)
 
     previous_type[0] = 0;
     
-    printf("\nWriting rank file...\n");
+    log_and_screen_printf("\nWriting rank file...\n");
     
     if (rank_table_filename) {
         table_fp = fopen(rank_table_filename, "w");
         if (!table_fp) {
-            printf("Error: Can't open table file %s\n", rank_table_filename);
+            log_and_screen_printf("Error: Can't open table file %s\n", rank_table_filename);
         }
     }
 
     if (rank_csv_filename) {
         csv_fp = fopen(rank_csv_filename, "w");
         if (!csv_fp) {
-            printf("Error: Can't open table file %s\n", rank_csv_filename);
+           log_and_screen_printf("Error: Can't open table file %s\n", rank_csv_filename);
         }
     }        
     
     if (csv_fp) {
-        fputs("Rank,Match,NumPth,Type,LngstCntig,LenP0,LenP1,CovC0P0,CovC0P1,CovC1P0,CovC1P1,PcC0P0,PcC0P1,PcC1P0,PcC1P1,C0Dif,C1Dif,QTotal\n", csv_fp);
+        fputs("Rank,Match,NumPth,Type,LngstCntig,LenP0,LenP1,CovC0P0,CovC0P1,CovC1P0,CovC1P1,PcC0P0,PcC0P1,PcC1P0,PcC1P1,C0Dif,C1Dif,QTotal,QAv,BPCov,BPRatio,BPInBds,BrkPaths\n", csv_fp);
     }
     
     strcpy(previous_type, matches[0]->statistics.type);
@@ -2290,13 +2412,17 @@ void output_rank_table(void)
             add_int_to_table(table_line, "%d", matches[m]->statistics.q_total, &column);
             
 #ifdef EXTRA_STATS
+#ifdef USE_CPNP_RANKING
             add_long_double_to_table(table_line, "%Le", matches[m]->statistics.cpnp, &column);
+#endif
+#ifdef USE_P_VALUE
             add_long_double_to_table(table_line, "%.4Lf", matches[m]->statistics.p_ratio[0], &column);
             add_long_double_to_table(table_line, "%.4Lf", matches[m]->statistics.p_ratio[1], &column);
             add_long_double_to_table(table_line, "%.4Lf", matches[m]->statistics.p_value[0][0], &column);
             add_long_double_to_table(table_line, "%.4Lf", matches[m]->statistics.p_value[1][0], &column);
             add_long_double_to_table(table_line, "%.4Lf", matches[m]->statistics.p_value[0][1], &column);
             add_long_double_to_table(table_line, "%.4Lf", matches[m]->statistics.p_value[1][1], &column);
+#endif
 #endif
             
             strcat(table_line, "\n");
@@ -2308,7 +2434,7 @@ void output_rank_table(void)
             
             if (csv_fp) {
                 if ((!(matches[m]->flags & FLAG_IGNORE)) && (!(matches[m]->flags & FLAG_REPEAT))) {
-                    sprintf(csv_line, "%d,%d,%d,%s,%d,%d,%d,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%d\n",
+                    sprintf(csv_line, "%d,%d,%d,%s,%d,%d,%d,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%d,%.2f,%d,%.2f,%d,%d\n",
                             rank_count,
                             matches[m]->match_number,
                             matches[m]->number_of_paths,
@@ -2326,7 +2452,12 @@ void output_rank_table(void)
                             matches[m]->statistics.coverage_complete[1][1] ? matches[m]->statistics.coverage_pc[1][1]:0.0,
                             matches[m]->statistics.coverage_difference[0],
                             matches[m]->statistics.coverage_difference[1],
-                            matches[m]->statistics.q_total);
+                            matches[m]->statistics.q_total,
+                            (double)matches[m]->statistics.q_average,
+                            matches[m]->statistics.highest_bp_coverage,
+                            (double)matches[m]->statistics.highest_bp_ratio,
+                            matches[m]->statistics.bp_ratio_within_bounds,
+                            matches[m]->statistics.broken_paths);
                     fputs(csv_line, csv_fp);
                     n_output_csv++;
                 }
@@ -2420,12 +2551,12 @@ void output_rank_contigs(void)
     log_write_timestamp(0);
     log_printf(" START Output rank contigs\n");
 
-    printf("\nWriting rank contig file...\n");
+    log_and_screen_printf("\nWriting rank contig file...\n");
     previous_type[0] = 0;
 
     formatted_seq = malloc(max_line_length);
     if (!formatted_seq) {
-        printf("Error: Insufficient memory to allocate space to store line.\n");
+        log_and_screen_printf("Error: Insufficient memory to allocate space to store line.\n");
         exit(1);
     }       
     
@@ -2467,6 +2598,83 @@ void output_rank_contigs(void)
 }
 
 /*----------------------------------------------------------------------*
+ * Function: check_fastq_type                                           *
+ * Purpose:  Check quality score encoding of FASTQ                      *
+ * Params:   filename -> filename of FASTQ file                         *
+ * Returns:  type code (defined in binary_kmer.h)                       *
+ *----------------------------------------------------------------------*/
+int check_fastq_type(char* filename, char* typestr, int* offset)
+{
+    int n_reads = 0;
+    char line[1000000];
+    int scores[255];
+    int i;
+    int lowest = 255;
+    int highest = 0;
+    int type;
+
+    for (i=0; i<255; i++) scores[i] = 0;
+
+    FILE* fp=fopen(filename, "r");
+    if (!fp) {
+        return TYPE_UNKNOWN;
+    }
+
+    while (!feof(fp) && (n_reads < 10000)) {
+        if (fgets(line, 1000000, fp)) {
+            if (fgets(line, 1000000, fp)) {
+                if (fgets(line, 1000000, fp)) {
+                    if (fgets(line, 1000000, fp)) {
+                        i=0;
+                        while ((i<strlen(line)) && (line[i] > 32)) {
+                            scores[(int)line[i++]]++;
+                        }
+                        n_reads++;
+                    }
+                }
+            }
+        }
+    }
+
+    fclose(fp);
+
+    for (i=0; i<255; i++) {
+        if (scores[i] > 0) {
+            if (i < lowest) {
+                lowest = i;
+            }
+            if (i > highest) {
+                highest = i;
+            }
+        }
+    }
+
+    if ((lowest>=64) && (highest<=126)) {
+        type=TYPE_ILLUMINA;
+        *offset=64;
+        strcpy(typestr, "ILLUMINA");
+    } else if ((lowest>=59) && (highest<=126)) {
+        type=TYPE_SOLEXA;
+        *offset=59;
+        strcpy(typestr, "SOLEXA");
+        printf("Error: SOLEXA currently unsupported.\n");
+        exit(1);
+    } else if ((lowest>=33) && (highest<=126)) {
+        strcpy(typestr, "SANGER");
+        *offset=33;
+        type=TYPE_SANGER;
+    } else {
+        type=TYPE_UNKNOWN;
+        *offset=0;
+        strcpy(typestr, "UNKNOWN");
+        printf("Error: Unknown quality score type.\n");
+        exit(1);
+    }
+
+    return type;
+}
+
+/*----------------------------------------------------------------------*
  * Function: look_for_quality_scores_in_fastq                           *
  * Purpose:  Look through all kmers in fastq files and see if they are  *
  *           in our hash table of first kmers in bubbles. If match is   *
@@ -2488,12 +2696,12 @@ void look_for_quality_scores_in_fastq(char* input_filename)
     log_write_timestamp(0);
     log_printf(" START Look for quality scores in FASTQ\n");
     
-    printf("\nLooking at quality scores...\n");
+    log_and_screen_printf("\nLooking at quality scores...\n");
     
     // Open file of file names
     fp_fnames= fopen(input_filename, "r");
     if (!fp_fnames) {
-        printf("Can't open file of files\n");
+        log_and_screen_printf("Can't open file of files\n");
         exit(1);
     }
     
@@ -2531,13 +2739,20 @@ void look_for_quality_scores_in_fastq(char* input_filename)
     while (!feof(fp_fnames)) {
         long long count_bad_reads = 0;
         short colour = 0;
+        int fastq_type;
+        int fastq_offset;
+        char fastq_type_str[16];
         fscanf(fp_fnames, "%s %hd\n", filename, &colour);
         
-        log_printf("Opening file %s\n", filename);
-        
+        log_and_screen_printf("Opening file %s\n", filename);
+
+        fastq_type = check_fastq_type(filename, fastq_type_str, &fastq_offset);
+        log_and_screen_printf("- Quality score encoding %s with offset %d\n", fastq_type_str, fastq_offset);
+        sequence_set_quality_parameters(seq, fastq_offset);
+
         fp_file = fopen(filename, "r");
         if (fp_file == NULL) {
-            printf("cannot open file:%s\n",filename);
+            log_and_screen_printf("cannot open file:%s\n",filename);
             exit(1);
         }
         
@@ -2573,7 +2788,7 @@ void look_for_quality_scores_in_fastq(char* input_filename)
             }
         }
                 
-        printf("- File: %i Filename: %s Colour: %d\n", count_file, filename, colour);
+        log_and_screen_printf("- File: %i Filename: %s Colour: %d\n", count_file, filename, colour);
     }
 
     log_write_timestamp(0);
@@ -2596,19 +2811,19 @@ void display_sequence_and_coverage(int m, int width)
     
     line = malloc(max_line_length);
     if (!line) {
-        printf("Error: Insufficient memory to allocate space to store line.\n");
+        log_and_screen_printf("Error: Insufficient memory to allocate space to store line.\n");
         exit(1);
     }    
     
     if (!fp) {
-        printf("Error: can't open %s\n", fasta_filename);
+        log_and_screen_printf("Error: can't open %s\n", fasta_filename);
         exit(1);
     }
     
     for (p=0; p<matches[m]->number_of_paths; p++) {
         fseek(fp, matches[m]->paths[p]->contig_file_offset, SEEK_SET);
         if (!fgets(line, max_line_length, fp)) {
-            printf("Error: couldn't read line.\n");
+            log_and_screen_printf("Error: couldn't read line.\n");
         }
         
         pos = 0;
@@ -2666,15 +2881,15 @@ void parse_expected_coverage_string(char *s)
                 };
                 coverage_pc_tolerance[colour] = tolerance;
             } else {
-                printf("Error: tolerance out of range in expected coverage file.\n");
+                log_and_screen_printf("Error: tolerance out of range in expected coverage file.\n");
             }
         } else {
-            printf("Error: colour out of range in expected coverage file.\n");
+            log_and_screen_printf("Error: colour out of range in expected coverage file.\n");
         }
     }
     
     if ((colour == -1) || (tolerance == -1)) {
-        printf("Error: badly formatted options file.\n");
+        log_and_screen_printf("Error: badly formatted options file.\n");
         exit(1);
     }
 }
@@ -2702,7 +2917,7 @@ void read_options_file(void)
     
     fp = fopen(options_filename, "r");
     if (!fp) {
-        printf("Error: Can't open options file.\n");
+        log_and_screen_printf("Error: Can't open options file.\n");
         exit(1);
     }
 
@@ -2714,12 +2929,12 @@ void read_options_file(void)
                 value = strtok(NULL, "\"");
 
                 if ((!param) || (!value)) {
-                    printf("Error: badly formatted options file. Please consult manual.\n");
+                    log_and_screen_printf("Error: badly formatted options file. Please consult manual.\n");
                     exit(1);
                 }
                 
                 if ((value[0] == '\'') || (value[strlen(value)-1] == '\'')) {
-                    printf("Error: badly formatted options file. Use \" instead of \'\n");
+                    log_and_screen_printf("Error: badly formatted options file. Use \" instead of \'\n");
                     exit(1);                    
                 }
                                 
@@ -2767,13 +2982,13 @@ void output_specified_match_contigs(char *in, char* out)
 
     fp_in = fopen(in, "r");
     if (!fp_in) {
-        printf("Error: Can't open specified matches filename.\n");
+        log_and_screen_printf("Error: Can't open specified matches filename.\n");
         exit(1);
     }
 
     fp_out = fopen(out, "w");
     if (!fp_out) {
-        printf("Error: Can't open specified matches output ilename.\n");
+        log_and_screen_printf("Error: Can't open specified matches output ilename.\n");
         exit(1);
     }
     
@@ -2781,7 +2996,7 @@ void output_specified_match_contigs(char *in, char* out)
     {
         fscanf(fp_in, "%d\n", &m);
 
-        printf("Looking for %d from %d\n",m, number_of_matches);
+        log_and_screen_printf("Looking for %d from %d\n",m, number_of_matches);
         if ((m>0) && (m<=number_of_matches)) {
             sprintf(header_line, ">Match_%d_Position_%d_", matches[m]->match_number, matches[m]->paths[0]->pre+1);
 
@@ -2808,7 +3023,7 @@ void output_specified_match_contigs(char *in, char* out)
     fclose(fp_in);
     fclose(fp_out);
     
-    printf("%d contigs output.\n", n_output);
+    log_and_screen_printf("%d contigs output.\n", n_output);
 
     log_write_timestamp(0);
     log_printf(" ENDED Output specified match contigs\n");
@@ -2837,7 +3052,7 @@ int check_inverted_duplicate(Match* ma, Match* mb)
         rev_a = malloc(ma->paths[p]->pre + ma->paths[p]->mid + ma->paths[p]->post + 1);
         
         if (!seq_a || !rev_a) {
-            printf("Error: Out of memory checking inverted duplicates.\n");
+            log_and_screen_printf("Error: Out of memory checking inverted duplicates.\n");
             exit(1);
         }
         
@@ -2850,7 +3065,7 @@ int check_inverted_duplicate(Match* ma, Match* mb)
         for (q=0; q<n_paths; q++) {
             seq_b = malloc(mb->paths[q]->pre + mb->paths[q]->mid + mb->paths[q]->post + 1);
             if (!seq_b) {
-                printf("Error: Out of memory checking inverted duplicates.\n");
+                log_and_screen_printf("Error: Out of memory checking inverted duplicates.\n");
                 exit(1);
             }
             
@@ -2896,18 +3111,18 @@ void deduplicate_matches(void)
         
     key = malloc(sizeof(Match));
     if (!key) {
-        printf("Error: couldn't get memory for MatchPath structure.\n");
+        log_and_screen_printf("Error: couldn't get memory for MatchPath structure.\n");
         exit(1);
     }                 
     key->paths[0] = malloc(sizeof(MatchPath));
     if (!key->paths[0]) {
-        printf("Error: couldn't get memory for MatchPath structure.\n");
+        log_and_screen_printf("Error: couldn't get memory for MatchPath structure.\n");
         exit(1);
     }
     key->number_of_paths = 1;
     key->paths[0]->first_contig_kmer = malloc(kmer_size+1);
     if (!key->paths[0]->first_contig_kmer) {
-        printf("Error: couldn't get memory for MatchPath structure.\n");
+        log_and_screen_printf("Error: couldn't get memory for MatchPath structure.\n");
         exit(1);
     }
     
@@ -2915,7 +3130,7 @@ void deduplicate_matches(void)
     log_write_timestamp(0);
     log_printf(" START Sorting for deduplicates\n");
     
-    printf("\nSorting matches for deduplicates...\n");  
+    log_and_screen_printf("\nSorting matches for deduplicates...\n");  
     qsort(matches, number_of_matches, sizeof(Match*), match_alpha_cmp);
     
     log_write_timestamp(0);
@@ -3011,24 +3226,30 @@ int parse_int(int argc, char* argv[], int* i)
 void parse_command_line_args(int argc, char* argv[])
 {
     int i = 1;
+    char* tempstr;
 
     if (argc < 4)
     {
-        printf("\nbubbleparse\n\n");
-        printf("Syntax: bubbleparse [-f filename] [-i filename] [-k int] [options]\n");
-        printf("where [-f filename] specifies the base filename of the files to parse\n");
+        printf("\nBubbleparse\n");
+        printf("Support: richard.leggett@tgac.ac.uk\n\n");
+        printf("Syntax: bubbleparse [-f filename] [-i filename] [-k int] [options]\n\n");
+        printf("Options:\n");
+        printf("      [-f filename] specifies the base filename of the files to parse\n");
         printf("      [-i filename] specifies the name of a file of files containing the original read files\n");
         printf("      [-k int] specifies kmer size\n");
         printf("      [-t filename] specifies the filename for a plain text ranked table of SNPs\n");
         printf("      [-c filename] specifies the filename for a CSV ranked table of SNPs\n");
         printf("      [-r filename] specifies the filename for a ranked contig FASTA file\n");
         printf("      [-l filename] specifies the filename for a rank log file\n");
-        //printf("      [-m filename] to cancel the full parse, but to output match contigs contained in file specified\n");  
         printf("      [-d filename] to output a log file\n");
         printf("      [-o filename] specifies an options file\n");
-        printf("      [-p int] specifies the FASTQ quality score offset (default 64)\n");
-        printf("      [-x] to remove reverse compliment duplicates due to X nodes\n");
+        printf("Development options (can be ignored):\n");
+        printf("      [-q] to rank on Q average, not Q total\n");
+        printf("      [-b min,max] to rank on branch point coverage ratio (for detecting repeats)\n");
+        printf("      [-x] to remove reverse compliment duplicates due to X nodes\n");        
+        //printf("      [-z] to turn on broken path detection\n");
         //printf("      [-y int] specifies the maximum line length in kb (default 8192).\n");
+        //printf("      [-m filename] to cancel the full parse, but to output match contigs contained in file specified\n");  
         printf("\n");
         exit(1);
     }
@@ -3040,6 +3261,15 @@ void parse_command_line_args(int argc, char* argv[])
         {
             switch (parameter[1])
             {
+                case 'b':
+                    rank_on_bp_coverage = TRUE; 
+                    tempstr = parse_string(argc, argv, &i);
+                    sscanf(tempstr, "%f,%f", &bp_coverage_min, &bp_coverage_max);
+                    if ((bp_coverage_min < 0) || (bp_coverage_max < 0) || (bp_coverage_max < bp_coverage_min)) {
+                        printf("Error: invalid -b parameter\n");
+                        exit(1);
+                    }                 
+                    break;
                 case 'c':
                     rank_csv_filename = parse_string(argc, argv, &i);
                     if (!rank_csv_filename) {
@@ -3103,11 +3333,8 @@ void parse_command_line_args(int argc, char* argv[])
                         exit(1);
                     }
                     break;
-                case 'p':
-                    quality_offset = parse_int(argc, argv, &i);
-                    if ((quality_offset != 64) && (quality_offset != 33) && (quality_offset != 59)) {
-                        printf("Warning: Unrecognised FASTQ quality offset... running anyway...\n");
-                    }
+                case 'q':
+                    rank_on_q_average = TRUE;
                     break;
                 case 'r':
                     rank_contig_filename = parse_string(argc, argv, &i);
@@ -3130,6 +3357,9 @@ void parse_command_line_args(int argc, char* argv[])
                     max_line_length = parse_int(argc, argv, &i) * 1024;
                     printf("Max line length set to %d bytes.\n", max_line_length);
                     break;
+                case 'z':
+                    rank_on_broken_paths = TRUE;
+                    break;
                 default:
                     printf("Error: Invalid parameter %c\n", parameter[1]);
                     exit(1);
@@ -3143,12 +3373,7 @@ void parse_command_line_args(int argc, char* argv[])
         printf("Error: Invalid kmer size.\n");
         exit(1);
     }
-    
-    //if (!file_of_filenames) {
-    //    printf("Error: You must specify an input file of files.\n");
-    //    exit(1);
-    //}
-    
+        
     if (!base_filename) {
         printf("Error: You must specify a .gv output file.\n");
         exit(1);
@@ -3174,7 +3399,7 @@ void make_random_quality_string(char* s)
 {
     int i;
     for (i=0; i<kmer_size; i++) {
-        s[i] = quality_offset + randint(40) + 20;
+        s[i] = 33 + randint(40) + 20;
     }
     s[kmer_size] = 0;
 }
@@ -3207,44 +3432,39 @@ void print_parameter_values(void)
 {
     int match_size = sizeof(Match)+sizeof(RankingStats)+((sizeof(MatchPath)+kmer_size+1)*MAX_PATHS_PER_MATCH);
     
-    printf("\nbubbleparse\n\n");
-    printf("                Max k: %i\n", (NUMBER_OF_BITFIELDS_IN_BINARY_KMER*32)-1);
-    printf("     Input fasta file: %s\n", fasta_filename);
-    printf("  Input coverage file: %s\n", coverage_filename);
+    log_and_screen_printf("\nbubbleparse\n\n");
+    log_and_screen_printf("                Max k: %i\n", (NUMBER_OF_BITFIELDS_IN_BINARY_KMER*32)-1);
+    log_and_screen_printf("     Input fasta file: %s\n", fasta_filename);
+    log_and_screen_printf("  Input coverage file: %s\n", coverage_filename);
     if (use_quality_scores) {
-        printf("  Input file of files: %s\n", file_of_filenames);
+        log_and_screen_printf("  Input file of files: %s\n", file_of_filenames);
     }
     if (match_selection_filename) {
-        printf(" Match selection file: %s\n", match_selection_filename);
-        printf("Selected matches file: %s\n", selected_matches_filename);
+        log_and_screen_printf(" Match selection file: %s\n", match_selection_filename);
+        log_and_screen_printf("Selected matches file: %s\n", selected_matches_filename);
     }
     if (rank_table_filename) {
-        printf("      Rank table file: %s\n", rank_table_filename);
+        log_and_screen_printf("      Rank table file: %s\n", rank_table_filename);
     }
     if (rank_csv_filename) {
-        printf("        Rank CSV file: %s\n", rank_csv_filename);
+        log_and_screen_printf("        Rank CSV file: %s\n", rank_csv_filename);
     }
     if (rank_contig_filename) {
-        printf("     Rank contig file: %s\n", rank_contig_filename);
+        log_and_screen_printf("     Rank contig file: %s\n", rank_contig_filename);
     }
     if (rank_log_filename) {
-        printf("        Rank log file: %s\n", rank_log_filename);
+        log_and_screen_printf("        Rank log file: %s\n", rank_log_filename);
     }    
-    printf("            Kmer size: %d\n", kmer_size);
-    printf("           Match size: %i\n", match_size);
-    printf("        c0 expected %%: %.2f/%.2f\n", expected_coverage_pc[0][0], expected_coverage_pc[1][0]);
-    printf("         c0 tolerance: %.2f\n", coverage_pc_tolerance[0]);
-    printf("        c1 expected %%: %.2f/%.2f\n", expected_coverage_pc[0][1], expected_coverage_pc[1][1]);
-    printf("         c1 tolerance: %.2f\n", coverage_pc_tolerance[1]);
-    printf("  Minimum contig size: %d\n", minimum_contig_size); 
-    printf(" Quality score offset: %i", quality_offset);
-
-    if (quality_offset == 33) {
-        printf(" (Sanger format)\n");
-    } else if (quality_offset == 64) {
-        printf(" (Solexa/Illumina format)\n");
-    } else {
-        printf(" (Unknown format)\n");
+    log_and_screen_printf("            Kmer size: %d\n", kmer_size);
+    log_and_screen_printf("           Match size: %i\n", match_size);
+    log_and_screen_printf("        c0 expected %%: %.2f/%.2f\n", expected_coverage_pc[0][0], expected_coverage_pc[1][0]);
+    log_and_screen_printf("         c0 tolerance: %.2f\n", coverage_pc_tolerance[0]);
+    log_and_screen_printf("        c1 expected %%: %.2f/%.2f\n", expected_coverage_pc[0][1], expected_coverage_pc[1][1]);
+    log_and_screen_printf("         c1 tolerance: %.2f\n", coverage_pc_tolerance[1]);
+    log_and_screen_printf("  Minimum contig size: %d\n", minimum_contig_size); 
+    if (rank_on_bp_coverage) {
+        log_and_screen_printf("     Minimum bp ratio: %.2f\n", bp_coverage_min);
+        log_and_screen_printf("     Maximum bp ratio: %.2f\n", bp_coverage_max);
     }
 }
 
@@ -3305,10 +3525,10 @@ int main (int argc, char * argv[])
     print_parameter_values();
 
     make_time_string(time_string);
-    printf("\nStarting at %s...\n\n", time_string);
+    log_and_screen_printf("\nStarting at %s...\n\n", time_string);
     
     // Create hash table
-    printf("Creating hash table (entry size %libytes, total size %iMb)\n", sizeof(Element), (int)(pow(2, n)*b*sizeof(Element)/1024/1024));
+    log_and_screen_printf("Creating hash table (entry size %libytes, total size %iMb)\n", sizeof(Element), (int)(pow(2, n)*b*sizeof(Element)/1024/1024));
     for (i=0; i<max_matches; i++) {
         matches[i] = 0;
     }
@@ -3316,6 +3536,7 @@ int main (int argc, char * argv[])
         
     read_fasta_file(fasta_filename);
     read_coverage_file(coverage_filename);
+    mean_coverage = coverage_count / coverage_nt;
 
     if (match_selection_filename) {
         output_specified_match_contigs(match_selection_filename, selected_matches_filename);
