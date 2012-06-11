@@ -45,6 +45,13 @@
 #define TRUE 1
 #define FALSE 0
 
+#ifndef TYPE_ILLUMINA
+#define TYPE_UNKNOWN  0
+#define TYPE_SANGER   1
+#define TYPE_SOLEXA   2
+#define TYPE_ILLUMINA 3
+#endif
+
 /*----------------------------------------------------------------------*
  * Flags                                                                *
  *----------------------------------------------------------------------*/
