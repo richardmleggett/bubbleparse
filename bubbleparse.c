@@ -74,16 +74,9 @@ typedef struct {
 
 typedef struct {
     char type[16];
-#ifdef USE_CPNP_RANKING
-    long double cpnp;
-#endif
     short flags;
     int q_total;
     double q_average;
-#ifdef USE_P_VALUE
-    long double p_ratio[2];
-    long double p_value[MAX_PATHS_PER_MATCH][MAX_COLOURS];
-#endif
     short coverage_complete[MAX_PATHS_PER_MATCH][MAX_COLOURS];
     double coverage_av[MAX_PATHS_PER_MATCH][MAX_COLOURS];
     double coverage_pc[MAX_PATHS_PER_MATCH][MAX_COLOURS];
@@ -93,6 +86,7 @@ typedef struct {
     int highest_bp_coverage;
     int broken_paths;
     char bp_ratio_within_bounds;
+    char mean_cov_within_bounds;
 } RankingStats;
 
 typedef struct {
@@ -179,8 +173,8 @@ int mean_coverage = 0;
 int rank_on_q_average = FALSE;
 int rank_on_bp_coverage = FALSE;
 int rank_on_broken_paths = TRUE;
-float bp_coverage_min = 0.8;
-float bp_coverage_max = 1.2;
+float bp_coverage_min = 0.2;
+float bp_coverage_max = 3.0;
 
 /*----------------------------------------------------------------------*
  * Table column widths                                                  *
@@ -188,11 +182,7 @@ float bp_coverage_max = 1.2;
 //                     0  1  2  3   4  5  6  7  8  9  10 11 12 13 14 15 16 17 18 19 20 21 22 23 24  25  26  27  28  29  30 
 int column_widths[] = {6, 6, 3, 10, 5, 3, 3, 3, 6, 8, 8, 8, 8, 8, 8, 6, 6, 6, 6, 6, 6, 6, 6, 6, 12, 10, 10, 10, 10, 10, 10};
 int space_between_columns = 1;
-#ifdef EXTRA_STATS
-int number_of_columns = 31;
-#else
 int number_of_columns = 24;
-#endif
 
 /*----------------------------------------------------------------------*
  * Flags                                                                *
@@ -1414,15 +1404,7 @@ void calculate_probabilities(int m)
     int c, i, p;
     int first_node;
     short total_coverage;
-#ifdef USE_P_VALUE
-    long double pn;
-    long double num, den;
-#endif
     char* kmer_string;
-#ifdef USE_CPNP_RANKING
-    long double combined_p;
-    long double cpnp = 1.0;
-#endif
     int n_q = 0;
 
     // Check all paths are kmer size...
@@ -1485,78 +1467,19 @@ void calculate_probabilities(int m)
                 }
             }
             
-            // CPNP calculation
-
-            // Sum up quality scores - these become the exponent
+            // Sum up quality scores
             for (i=0; i<qa->number_of_strings; i++) {
                 char* qs = qa->quality_strings[i].quality;
                 q_total += qs[matches[m]->paths[p]->first_bubble_kmer_offset]-33;
                 n_q++;
             }
-            
-#ifdef USE_CPNP_RANKING            
-            // Workout combined (combination of quality scores) p-value for this path and colour
-            combined_p = powl(10.0, (q_total/-10));
-            combined_p *= matches[m]->paths[p]->colour_coverage[c]->coverage[first_node]; 
-            combined_p /= total_coverage;
                         
-            // Now, we want to build a probability that this is correct, so the probablity that
-            // this path and colour is correct is 1-combined_p. The CPNP is obtained by
-            // multiplying all these values together.
-            cpnp *= (1-combined_p);
-#endif
-
-            // Alternative to CPNP - total quality score
-            
             // Update Q total
             matches[m]->statistics.q_total += q_total;
-
-#ifdef USE_P_VALUE
-            // Another alternative - sum up the probabilities
-            pn = 0;
-            for (i=0; i<qa->number_of_strings; i++) {
-                char* qs = qa->quality_strings[i].quality;
-                int qi = qs[matches[m]->paths[p]->first_bubble_kmer_offset]-33;
-                pn = pn + (1 - powl(10.0, (qi/-10)));
-            }
-            if (matches[m]->statistics.coverage_complete[p][c]) {
-                matches[m]->statistics.p_value[p][c] = pn;
-            } else {
-                matches[m]->statistics.p_value[p][c] = 0;
-            }
-#endif
         }
     }
 
-    matches[m]->statistics.q_average = matches[m]->statistics.q_total / n_q;
-   
-#ifdef USE_P_VALUE 
-    // Now work out the p ratios
-    for (c=0; c<number_of_colours; c++) {
-        if (matches[m]->number_of_paths == 2) {
-            if (matches[m]->statistics.p_value[0][c] > matches[m]->statistics.p_value[1][c]) {
-                num = matches[m]->statistics.p_value[0][c];
-                den = matches[m]->statistics.p_value[1][c];
-            } else {
-                num = matches[m]->statistics.p_value[1][c];
-                den = matches[m]->statistics.p_value[0][c];
-            }
-            
-            if (den > 0) {
-                matches[m]->statistics.p_ratio[c] = num/den;
-            } else {
-                matches[m]->statistics.p_ratio[c] = num/0.1;
-            }               
-        } else {
-            matches[m]->statistics.p_ratio[0] = 0;
-            matches[m]->statistics.p_ratio[1] = 0;
-        }
-    }
-#endif
-   
-#ifdef USE_CPNP_RANKING 
-    matches[m]->statistics.cpnp = cpnp;
-#endif
+    matches[m]->statistics.q_average = matches[m]->statistics.q_total / n_q;   
 }
 
 /*----------------------------------------------------------------------*
@@ -1705,19 +1628,14 @@ void score_matches(void)
         }
     }
     
-   log_and_screen_printf("\nScoring matches...\n");
+    log_and_screen_printf("\nScoring matches...\n");
     
     for (m=0; m<number_of_matches; m++) {        
         log_printf("Match %d of %d\n", m, number_of_matches);
  
-        //if (((m % 100000) == 0) || (m == number_of_matches-1)) {
-        //    log_printf("Reached match %d\n", m);
-        //}
-        
         matches[m]->statistics.combined_coverage = 0;
         if (!(matches[m]->flags & FLAG_IGNORE)) {
             // Clear coverage matrix
-            //log_printf("\tCheckpoint 1\n");
             for (p=0; p<MAX_PATHS_PER_MATCH; p++) {
                 for (c=0; c<number_of_colours; c++) {
                     matches[m]->statistics.coverage_av[p][c] = 0;
@@ -1726,7 +1644,6 @@ void score_matches(void)
             }
             
             // Fill coverage matrix
-            //log_printf("\tCheckpoint 2\n");
             for (c=0; c<number_of_colours; c++) {
                 for (p=0; p<matches[m]->number_of_paths; p++) {
                     matches[m]->statistics.coverage_av[p][c] = get_average_bubble_coverage(m, p, c, &(matches[m]->statistics.coverage_complete[p][c]));
@@ -1735,7 +1652,6 @@ void score_matches(void)
             }
             
             // Check if bubble paths are the same length
-            //log_printf("\tCheckpoint 3\n");
             set_flag(&matches[m]->statistics.flags, FLAG_PATHS_SAME_LENGTH);
             matches[m]->longest_contig = 0;
             for (p=1; p<matches[m]->number_of_paths; p++) {
@@ -1748,7 +1664,6 @@ void score_matches(void)
             }
             
             // Make it a percentage
-            //log_printf("\tCheckpoint 4\n");
             lowest = 100.0;
             for (c=0; c<number_of_colours; c++) {
                 total = 0.0;
@@ -1776,11 +1691,9 @@ void score_matches(void)
             }
             
             // Find type
-            //log_printf("\tCheckpoint 5\n");
             find_type(m);
             
             // Check if coverage percentage within tolerance
-            //log_printf("\tCheckpoint 6\n");
             calculate_coverage_difference(m);
             set_flag(&matches[m]->statistics.flags, FLAG_COVERAGE_WITHIN_BOUNDS);
             for (c=0; c<number_of_colours; c++) {
@@ -1791,31 +1704,20 @@ void score_matches(void)
             }
 
             // Calculate probabilities for ranking
-            //log_printf("\tCheckpoint 7\n");
             calculate_probabilities(m);
                         
             // Find branch node highest coverage - if there's a problem, default to average coverage
+            matches[m]->statistics.bp_ratio_within_bounds = 0;                
+            matches[m]->statistics.highest_bp_coverage = -1;
             left_node = matches[m]->paths[0]->pre - 1;
             right_node = matches[m]->paths[0]->pre + matches[m]->paths[0]->mid;
             left_cov = 0;
             right_cov = 0;
             hbc = mean_coverage;
 
-            //log_printf("\tAbout to do repeat scoring\n");
-            //log_printf("\t\tMatch %d", m);
-            //log_printf("\tpre %d", matches[m]->paths[0]->pre);
-            //log_printf("\tmod %d", matches[m]->paths[0]->mid);
-            //log_printf("\tpost %d", matches[m]->paths[0]->post);
-            //log_printf("\tcontig_length %d", matches[m]->paths[0]->contig_length);
-            //log_printf("\tleft_node %d", left_node);
-            //log_printf("\tright_node %d", right_node);
-            //log_printf("\tcov size 0 %d", matches[m]->paths[0]->colour_coverage[0]->size);
-            //log_printf("\tcov size 1 %d\n", matches[m]->paths[0]->colour_coverage[1]->size);
-
             if ((right_node < matches[m]->paths[0]->colour_coverage[0]->size) &&
                 (right_node < matches[m]->paths[0]->colour_coverage[1]->size)) {
                 for (c=0; c<number_of_colours; c++) {
-                    //log_printf("\t\tColour %d\n", c);
                     left_cov += matches[m]->paths[0]->colour_coverage[c]->coverage[left_node];
                     right_cov += matches[m]->paths[0]->colour_coverage[c]->coverage[right_node];
                 }
@@ -1833,20 +1735,12 @@ void score_matches(void)
             matches[m]->statistics.highest_bp_ratio = hbc / (double)mean_coverage;
             if ((matches[m]->statistics.highest_bp_ratio >= bp_coverage_min) && (matches[m]->statistics.highest_bp_ratio <= bp_coverage_max)) {
                 matches[m]->statistics.bp_ratio_within_bounds = 1;
-            } else {
-                matches[m]->statistics.bp_ratio_within_bounds = 0;
             }
-
-            //log_printf("\tCheckpoint 8\n");
-
+                        
             // Output to log file
             if (rank_log_filename) {
                 fprintf(fp, "Match %d\n", m);
                 fprintf(fp, "  Type: %s\n", matches[m]->statistics.type);
-
-#ifdef USE_CPNP_RANKING
-                fprintf(fp, "  CPNP: %Le\n", matches[m]->statistics.cpnp);
-#endif
                 
                 for (p=0; p<matches[m]->number_of_paths; p++) {
                     if (strlen(matches[m]->paths[p]->first_bubble_kmer) != kmer_size) {
@@ -1868,16 +1762,11 @@ void score_matches(void)
                     }
                 }           
             }
-            //log_printf("\tEnd loop\n");
         }
-       
-        //log_printf("\tCheckpoint 9\n");
- 
+        
         if (rank_log_filename) {
             fprintf(fp, "\n");
         }
-
-        //log_printf("\tCheckpoint 10\n");
     }
     
     log_and_screen_printf("Kmers with no. quality scores > coverage: %d\n", no_match_high);
@@ -1982,16 +1871,7 @@ int match_rank(const void *a, const void *b)
             return ma->statistics.broken_paths - mb->statistics.broken_paths;
         }         
     }
-
-#ifdef USE_CPNP_RANKING
-    // On CPNP
-    if (ma->statistics.cpnp > mb->statistics.cpnp) {
-        return -1;
-    } else if (ma->statistics.cpnp < mb->statistics.cpnp) {
-        return 1;
-    }
-#endif
-   
+       
     // Rank on branch point coverage ratio
     if (rank_on_bp_coverage) {
         if (mb->statistics.bp_ratio_within_bounds != ma->statistics.bp_ratio_within_bounds) {
@@ -2191,23 +2071,6 @@ void output_header_line(FILE *fp)
     
     add_to_table(line1, "", &column1);
     add_to_table(line2, "QTotal", &column2);  // 23
-
-#ifdef EXTRA_STATS
-    add_to_table(line1, "", &column1);
-    add_to_table(line2, "CPNP", &column2);    // 24
-
-    add_to_table_with_span(line1, "p ratio", &column1, 2);
-    add_to_table(line2, "c0", &column2);      // 25
-    add_to_table(line2, "c1", &column2);      // 26
-    
-    add_to_table_with_span(line1, "c0 p-value", &column1, 2);
-    add_to_table(line2, "P0", &column2);      // 27
-    add_to_table(line2, "P1", &column2);      // 28
-    
-    add_to_table_with_span(line1, "c1 p-value", &column1, 2);
-    add_to_table(line2, "P0", &column2);      // 29
-    add_to_table(line2, "P1", &column2);      // 30
-#endif
     
     fputs(line1, fp);
     fputs("\n", fp);
@@ -2417,21 +2280,7 @@ void output_rank_table(void)
             add_double_to_table(table_line, "%.2f", matches[m]->statistics.coverage_difference[1], &column);
             
             add_int_to_table(table_line, "%d", matches[m]->statistics.q_total, &column);
-            
-#ifdef EXTRA_STATS
-#ifdef USE_CPNP_RANKING
-            add_long_double_to_table(table_line, "%Le", matches[m]->statistics.cpnp, &column);
-#endif
-#ifdef USE_P_VALUE
-            add_long_double_to_table(table_line, "%.4Lf", matches[m]->statistics.p_ratio[0], &column);
-            add_long_double_to_table(table_line, "%.4Lf", matches[m]->statistics.p_ratio[1], &column);
-            add_long_double_to_table(table_line, "%.4Lf", matches[m]->statistics.p_value[0][0], &column);
-            add_long_double_to_table(table_line, "%.4Lf", matches[m]->statistics.p_value[1][0], &column);
-            add_long_double_to_table(table_line, "%.4Lf", matches[m]->statistics.p_value[0][1], &column);
-            add_long_double_to_table(table_line, "%.4Lf", matches[m]->statistics.p_value[1][1], &column);
-#endif
-#endif
-            
+                        
             strcat(table_line, "\n");
             if (table_fp) {
                 fputs(table_line, table_fp);
@@ -3250,13 +3099,12 @@ void parse_command_line_args(int argc, char* argv[])
         printf("      [-l filename] specifies the filename for a rank log file\n");
         printf("      [-d filename] to output a log file\n");
         printf("      [-o filename] specifies an options file\n");
-        printf("Development options (can be ignored):\n");
+        printf("Development options (best to ignore these!):\n");
         printf("      [-q] to rank on Q average, not Q total\n");
         printf("      [-b min,max] to rank on branch point coverage ratio (for detecting repeats)\n");
         printf("      [-x] to remove reverse compliment duplicates due to X nodes\n");        
-        //printf("      [-z] to turn on broken path detection\n");
-        //printf("      [-y int] specifies the maximum line length in kb (default 8192).\n");
-        //printf("      [-m filename] to cancel the full parse, but to output match contigs contained in file specified\n");  
+        printf("      [-y int] specifies the maximum line length in kb (default 8192).\n");
+        printf("      [-m filename] to cancel the full parse, but to output match contigs contained in file specified\n");  
         printf("\n");
         exit(1);
     }
